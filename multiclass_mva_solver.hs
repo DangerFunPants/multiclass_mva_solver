@@ -63,10 +63,14 @@ solve_multiclass_mva ns
     return (q_lengths, throughputs, response_times)
 
   where
+    all_zeros :: [Int] -> Bool
     all_zeros ns = ((length . filter (/=0)) ns) == 0
 
+    empty_q_dict :: Int -> M.Map Int Float
     empty_q_dict k = foldl (\acc v -> M.insert v 0.0 acc) M.empty [0..(k-1)]
 
+    fold_fn
+      :: M.Map Int (M.Map Int Float) -> Int -> Env (M.Map Int (M.Map Int Float))
     fold_fn acc c = 
       if ns !! c == 0
         then do
@@ -79,10 +83,11 @@ solve_multiclass_mva ns
           result <- foldM (compute_response_time q c) M.empty [0..(resource_count-1)]
           return $ M.insert c result acc
 
-    compute_response_time q c acc k = do
-      d_ck <- get_demand c k
-      let (Just q_k) = M.lookup k q
-      return $ M.insert k (d_ck * (1 + q_k)) acc
+    compute_response_time
+      :: M.Map Int Float -> Int -> M.Map Int Float -> Int -> Env (M.Map Int Float)
+    compute_response_time q c acc k = 
+      get_demand c k >>= \d_ck -> return $ M.insert k (d_ck * (1 + q_k)) acc
+      where (Just q_k) = M.lookup k q
 
     compute_throughput 
       :: M.Map Int (M.Map Int Float) -> M.Map Int Float -> Int -> Env (M.Map Int Float)
@@ -96,6 +101,9 @@ solve_multiclass_mva ns
               throughput = (fromIntegral (ns !! c)) / (think_time + total_response_time)
           return $ M.insert c throughput acc
 
+    compute_q_lengths 
+      :: M.Map Int (M.Map Int Float) -> M.Map Int Float 
+      -> M.Map Int Float -> Int -> Env (M.Map Int Float)
     compute_q_lengths response_times throughputs acc k = do
       class_count <- get_class_count
       let this_resource = sum $ fmap each_class [0..(class_count-1)]
