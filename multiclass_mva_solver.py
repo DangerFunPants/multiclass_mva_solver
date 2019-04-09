@@ -83,8 +83,12 @@ class Model_Spec:
     def get_queueing_centers(self):
         return self._queueing_centers
 
+    def get_delay_centers(self):
+        return self._delay_centers
+
     demands= property(get_demands)
     queueing_centers = property(get_queueing_centers)
+    delay_centers = property(get_delay_centers)
 
     def get_infinite_server_time(self, class_name):
         return sum([self._demands[class_name][inf_server]
@@ -146,10 +150,6 @@ class Model_Solution:
 
 def build_model(delay_centers, queueing_centers, demands, think, population_vector):
     model = Model_Spec()
-    # for client_name, v in D.items():
-    #     for dev_name, demand in v.items():
-    #         model.add_server(dev_name)
-
     for client_name, v in demands.items():
         for dev_name, demand in v.items():
             if dev_name in delay_centers:
@@ -159,14 +159,11 @@ def build_model(delay_centers, queueing_centers, demands, think, population_vect
             else:
                 print("Error building model. Unknown device name.")
 
-    # for client_name, d in D.items():
-    #     model.add_customer_class(client_name, ns[client_name], D[client_name], Z[client_name])
     for client_name, d in demands.items():
         model.add_customer_class(client_name, population_vector[client_name], 
                 d, think[client_name])
 
     return model
-
 
 def multiclass_mva_solver(model):
     def all_zeros(ns):
@@ -226,83 +223,20 @@ def detailed_response_time(model_output):
     Q, X, R = model_output
     return R
 
-def method_of_layers():
-    # Initialize assuming no device contention
-    # R_{g,k} = V_{g,k} * S_{g,k} for all G \in G_l, k \in K
-    R = { 0: { 0: 0.0, 1: 0.0 } 
-        , 1: { 0: 0.2, 1: 0.0 }
-        , 2: { 0: 0.0, 1: 0.1 }
-        }
-
-# def sw_model2():
-#     ns = [3]
-#     D = {0: {0: 0.0, 1: 0.0, 2: 0.3}
-#         } 
-#     Z = {0: 1.0}
-#     K = 3
-#     C = 1
-#     return (C, D, K, Z, ns)
-
-# Clients:
-# 0: Web sw process
-
-# Servers:
-# 0: Web cpu
-# 1: db cpu
-# 2: db sw process
-def sw_model1():
-    ns = [1]
-    D = { 0: {0: 0.0, 1: 0.0, 2: 0.1}
-        }
-    Z = {0: 0.225468164794007486} 
-    K = 3
-    C = 1
-    return (C, D, K, Z, ns)
-
-# Clients:
-# 0: Web sw process
-# 1: Db sw process
-# 
-# Servers:
-# 0: web cpu
-# 1: db cpu
-def hw_model():
-    # Not sure what the number of customers should be?
-    # Since the question states that everything executes synchronously 
-    # I would assume one but that could most certianly be incorrect. 
-    # 0 is web, 1 is db
-    ns = [1, 1] 
-    D = { 0: {0: 0.2, 1: 0.0}
-        , 1: {0: 0.0, 1: 0.1}
-        }
-    Z = { 0: 0.125468164794007486
-        , 1: 0.22546816479400753
-        }
-    K = 2
-    C = 2
-    return (C, D, K, Z, ns)
-
 def compute_abs_error(expected, actual):
     numer = abs(expected - actual)
     return numer / expected
 
 def check_error_tolerance(hw_results, sw_models):
-    # each software resource will have a response time for a subset
-    # of the devices present in the H/W model. For each of these
-    # response times, traverse the list of S/W models, find the error
-    # and report it.
+    abs_errors = []
     for sw_model in sw_models:
-        for class_name, demand_dict in sw_model.demands.items():
-            for device_name, demand in demand_dict.items():
-                if (class_name in hw_results.response_times and
-                    device_name in hw_results.response_times[class_name]):
-                    hw_time = hw_results.response_times[class_name][device_name]
-                    assumed_time = demand
-                    print(class_name, device_name)
-                    print("Current: ", hw_time)
-                    print("Assumed: ", assumed_time)
-                    error = compute_abs_error(hw_time, assumed_time)
-                    print("Error: ", error)
+        for consumer, ds in sw_model.demands.items():
+            for resource, demand in ds.items():
+                if resource in sw_model.delay_centers:
+                    hw_estimate = hw_results.response_times[consumer][resource]
+                    error = compute_abs_error(hw_estimate, demand)
+                    abs_errors.append(error)
+    return abs_errors
 
 # For now this method assumes that the sw models appear in order in the list. 
 # This is easy to fix, construct a DAG where edges are clients consuming resources at a
@@ -317,14 +251,15 @@ def solve_lqm_sw_models(sw_models):
         idle_times = model_result.idle_times()
         for class_name, idle_time in idle_times.items():
             results[class_name] = idle_time
+            # @Fixme: Add to appropriate delay resource, not think time.
             sw_models[idx+1].add_think_time(class_name, idle_time)
         
     return results
 
 def solve_lqm_model(sw_models, hw_model, tolerance):
     """
-    sw_models :: [Model_Spec]
-    hw_models :: [Model_Spec]
+    sw_models   :: [Model_Spec]
+    hw_model    :: Model_Spec
     Note that sw_models contains all (L) software models even though only L-1 models
     are actually solved
     """
@@ -334,8 +269,9 @@ def solve_lqm_model(sw_models, hw_model, tolerance):
         for class_name, idle_time in sw_proc_idle_times.items():
             hw_model.add_think_time(class_name, idle_time)
         hw_model_results = solve_mva_model(hw_model)
-        check_error_tolerance(hw_model_results, sw_models)
-        break
+        abs_errors = check_error_tolerance(hw_model_results, sw_models)
+        if max(abs_errors) < tolerance:
+            break
 
     return hw_model_results
 
