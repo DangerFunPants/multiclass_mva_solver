@@ -9,17 +9,28 @@ class Model_Spec:
         self._ns = {}
         # demands :: c -> k -> \mathbb{R}
         # c \in Clients, k \in Servers
+        # Demands for queueing and delay resources. Could namespace these two but whatevs
         self._demands = {}
-        self._server_list = []
-        # Think times (infinite server resources)
+
+        # Need to differentiate between dealy and queueing centers
+        self._queueing_centers = set()
+        self._delay_centers = set()
+
+        # Treat think independant of delay resources.
         # think :: c -> \mathbb{R}
         self._think = {}
 
+    # deprecated
     def add_server(self, name):
-        self._server_list.append(name)
         for c_ident in self._demands.keys():
-            # initialize demands to zero for new servers.
+            # initialize demands to zero for new resources.
             self._demands[c_ident][name] = 0.0
+
+    def add_queueing_center(self, name):
+        self._queueing_centers.add(name)
+
+    def add_delay_center(self, name):
+        self._delay_centers.add(name)
 
     def add_customer_class(self, name, count, demands, think):
         """
@@ -28,7 +39,7 @@ class Model_Spec:
         """
         self._ns[name] = count
         self._demands[name] = {}
-        for server in self._server_list:
+        for server in self._queueing_centers.union(self._delay_centers):
             self._demands[name][server] = demands.get(server, 0.0)
         self._think[name] = think
 
@@ -54,17 +65,30 @@ class Model_Spec:
         elif key == 1:
             return copy.deepcopy(self._demands)
         elif key == 2:
-            return len(self._server_list)
+            return len(self._queueing_centers)
         elif key == 3:
             return copy.deepcopy(self._think)
         elif key == 4:
             return copy.deepcopy(self._ns)
+        elif key == 5:
+            return self._queueing_centers
+        elif key == 6:
+            return self._delay_centers
         else:
             raise IndexError("Attempted to unpack Model_Spec into more than four params")
+
     def get_demands(self):
         return self._demands
 
+    def get_queueing_centers(self):
+        return self._queueing_centers
+
     demands= property(get_demands)
+    queueing_centers = property(get_queueing_centers)
+
+    def get_infinite_server_time(self, class_name):
+        return sum([self._demands[class_name][inf_server]
+                    for inf_server in self._delay_centers])
 
 class Model_Solution:
     def __init__(self, throughput, response_time, queue_lengths, think):
@@ -120,27 +144,39 @@ class Model_Solution:
     def __repr__(self):
         return str(self)
 
-def build_model(C, D, K, Z, ns):
+def build_model(delay_centers, queueing_centers, demands, think, population_vector):
     model = Model_Spec()
-    for client_name, v in D.items():
+    # for client_name, v in D.items():
+    #     for dev_name, demand in v.items():
+    #         model.add_server(dev_name)
+
+    for client_name, v in demands.items():
         for dev_name, demand in v.items():
-            model.add_server(dev_name)
+            if dev_name in delay_centers:
+                model.add_delay_center(dev_name)
+            elif dev_name in queueing_centers:
+                model.add_queueing_center(dev_name)
+            else:
+                print("Error building model. Unknown device name.")
 
-    # for k in range(K):
-    #     model.add_server(k)
+    # for client_name, d in D.items():
+    #     model.add_customer_class(client_name, ns[client_name], D[client_name], Z[client_name])
+    for client_name, d in demands.items():
+        model.add_customer_class(client_name, population_vector[client_name], 
+                d, think[client_name])
 
-    for client_name, d in D.items():
-        model.add_customer_class(client_name, ns[client_name], D[client_name], Z[client_name])
     return model
 
 
-def multiclass_mva_solver(C, D, K, Z, ns):
+def multiclass_mva_solver(model):
     def all_zeros(ns):
         return len([v for v in ns.values() if v != 0]) == 0
-
+    
+    # need "with" keyword, that would be cool maybe...
+    C, D, K, Z, ns, queueing_centers, delay_centers = model
     # This will most assuredly break...
     customer_classes = list(ns.keys())
-    device_names = list(next(iter(D.values())).keys())
+    device_names = model.queueing_centers
 
     if all_zeros(ns):
         return ({k: 0 for k in device_names}, {}, {})
@@ -152,7 +188,9 @@ def multiclass_mva_solver(C, D, K, Z, ns):
             else:
                 new_vector = copy.deepcopy(ns)
                 new_vector[c] -= 1
-                Q, _, _ = multiclass_mva_solver(C, D, K, Z, new_vector)
+                next_iter_model = build_model(delay_centers, queueing_centers,
+                        D, Z, new_vector)
+                Q, _, _ = multiclass_mva_solver(next_iter_model)
                 for k in device_names:
                     R[c][k] = D[c][k] * (1 + Q[k])
 
@@ -161,7 +199,7 @@ def multiclass_mva_solver(C, D, K, Z, ns):
             if ns[c] == 0:
                 X[c] = 0
             else:
-                X[c] = ns[c] / (Z[c] + sum(R[c].values()))
+                X[c] = ns[c] / (Z[c] + model.get_infinite_server_time(c) + sum(R[c].values()))
         
         Q = {}
         for k in device_names:
@@ -170,7 +208,7 @@ def multiclass_mva_solver(C, D, K, Z, ns):
         return Q, X, R
 
 def solve_mva_model(model):
-    Q, X, R = multiclass_mva_solver(*model)
+    Q, X, R = multiclass_mva_solver(model)
     
     return Model_Solution(X, R, Q, model._think)
 
@@ -307,27 +345,27 @@ def main():
         D = {"clients": {"web_server": 0.3}
             } 
         Z = {"clients": 1.0}
-        K = 1
-        C = 1
-        return (C, D, K, Z, ns)
+        delay_centers = {}
+        queueing_centers = {"web_server"}
+        return (delay_centers, queueing_centers, D, Z, ns)
 
     def sw_model1():
         ns = {"web_server": 1}
-        D = { "web_server": {"db_server": 0.1}
+        D = { "web_server": {"db_server": 0.1, "web_server_cpu": 0.2}
             }
-        Z = {"web_server": 0.2}
-        K = 3
-        C = 1
-        return (C, D, K, Z, ns)
+        Z = {"web_server": 0.0}
+        delay_centers = {"web_server_cpu"}
+        queueing_centers = {"db_server"}
+        return (delay_centers, queueing_centers, D, Z, ns)
 
     def sw_model0():
         ns = {"db_server": 1}
-        D = { "db_server": {}
+        D = { "db_server": {"db_server_cpu": 0.1}
             }
-        Z = {"db_server": 0.1}
-        K = 1
-        C = 1
-        return (C, D, K, Z, ns)
+        Z = {"db_server": 0.0}
+        delay_centers = {"db_server_cpu"}
+        queueing_centers = set()
+        return (delay_centers, queueing_centers, D, Z, ns)
 
     def hw_model():
         # Not sure what the number of customers should be?
@@ -344,9 +382,9 @@ def main():
         Z = { "web_server": 0.0
             , "db_server": 0.0
             }
-        K = 2
-        C = 2
-        return (C, D, K, Z, ns)
+        delay_centers = {"web_server", "db_server"}
+        queueing_centers = {"web_server_cpu", "db_server_cpu"}
+        return (delay_centers, queueing_centers, D, Z, ns)
 
     sw_models = [ build_model(*sw_model2())
                 , build_model(*sw_model1())
