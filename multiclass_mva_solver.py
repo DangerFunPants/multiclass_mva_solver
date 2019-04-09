@@ -31,6 +31,9 @@ class Model_Spec:
         for server in self._server_list:
             self._demands[name][server] = demands.get(server, 0.0)
         self._think[name] = think
+
+    def add_think_time(self, name, time):
+        self._think[name] += time
     
     def __str__(self):
         s = ( "Population Vector:\n"
@@ -58,12 +61,17 @@ class Model_Spec:
             return copy.deepcopy(self._ns)
         else:
             raise IndexError("Attempted to unpack Model_Spec into more than four params")
+    def get_demands(self):
+        return self._demands
+
+    demands= property(get_demands)
 
 class Model_Solution:
-    def __init__(self, throughput, response_time, queue_lengths):
+    def __init__(self, throughput, response_time, queue_lengths, think):
         self._throughputs = throughput
         self._response_times = response_time 
         self._queue_lengths = queue_lengths
+        self._think = think
 
     def throughput(self, class_name):
         return self._throughputs[class_name]
@@ -74,14 +82,32 @@ class Model_Solution:
     def detailed_response_time(self, class_name):
         return self._response_times[class_name]
 
+    def get_response_times(self):
+        return self._response_times
+
+    response_times = property(get_response_times)
+
     def queue_lengths(self, class_name):
         return self._queue_lengths[class_name]
 
-    def idle_time(self, class_name):
-        x = 1 / (sum(self._response_times[class_name]) + self._think[class_name])
-        r = sum(self._response_times[class_name])
+    def idle_time(self, dev_name):
+        x = sum([tput for c_name_prime, tput in self._throughputs.items()
+            if self._response_times[c_name_prime][dev_name] != 0.0])
+        r = sum([dev_dict[dev_name] for c_name, dev_dict in self._response_times.items()
+                if dev_dict[dev_name] != 0.0])
         u = r * x
+        if u == 0:
+            return 0.0
         return (r / u) - r
+
+    def idle_times(self):
+        return {c_name: self.idle_time(c_name) for c_name in self.devices()}
+    
+    def classes(self):
+        return next(iter(self._response_times.values())).keys()
+
+    def devices(self):
+        return next(iter(self._response_times.values())).keys()
 
     def __str__(self):
         s = ( "Throughput: \n"
@@ -96,62 +122,57 @@ class Model_Solution:
 
 def build_model(C, D, K, Z, ns):
     model = Model_Spec()
-    for k in range(K):
-        model.add_server(k)
+    for client_name, v in D.items():
+        for dev_name, demand in v.items():
+            model.add_server(dev_name)
 
-    for c in range(C):
-        model.add_customer_class(c, ns[c], D[c], Z[c])
+    # for k in range(K):
+    #     model.add_server(k)
+
+    for client_name, d in D.items():
+        model.add_customer_class(client_name, ns[client_name], D[client_name], Z[client_name])
     return model
 
 
 def multiclass_mva_solver(C, D, K, Z, ns):
     def all_zeros(ns):
-        return len([v for v in ns if v != 0]) == 0
+        return len([v for v in ns.values() if v != 0]) == 0
+
+    # This will most assuredly break...
+    customer_classes = list(ns.keys())
+    device_names = list(next(iter(D.values())).keys())
 
     if all_zeros(ns):
-        return ({k: 0 for k in range(K)}, {}, {})
+        return ({k: 0 for k in device_names}, {}, {})
     else:
         R = defaultdict(dict)
-        for c in range(C):
+        for c in customer_classes:
             if ns[c] == 0:
-                R[c] = {k: 0 for k in range(K)}
+                R[c] = {k: 0 for k in device_names}
             else:
                 new_vector = copy.deepcopy(ns)
                 new_vector[c] -= 1
                 Q, _, _ = multiclass_mva_solver(C, D, K, Z, new_vector)
-                for k in range(K):
+                for k in device_names:
                     R[c][k] = D[c][k] * (1 + Q[k])
 
         X = {}
-        for c in range(C):
+        for c in customer_classes:
             if ns[c] == 0:
                 X[c] = 0
             else:
                 X[c] = ns[c] / (Z[c] + sum(R[c].values()))
-                print("X[%d]: %f" % (c, X[c]))
         
         Q = {}
-        for k in range(K):
-            Q[k] = sum([X[c] * R[c][k] for c in range(C)])
+        for k in device_names:
+            Q[k] = sum([X[c] * R[c][k] for c in customer_classes])
 
         return Q, X, R
 
 def solve_mva_model(model):
     Q, X, R = multiclass_mva_solver(*model)
-    return Model_Solution(X, R, Q)
-
-def some_model():
-    ns = [3, 1]
-    D = { 0: {0: 0.105, 1: 0.180, 2: 0.000}
-        , 1: {0: 0.375, 1: 0.480, 2: 0.240}
-        }
-    Z = { 0: 0.0
-        , 1: 0.0
-        }
-    K = 3
-    C = 2
-    res = multiclass_mva_solver(C, D, K, Z, ns)
-    pp.pprint(res)
+    
+    return Model_Solution(X, R, Q, model._think)
 
 def throughput(model_output):
     Q, X, R = model_output
@@ -175,14 +196,14 @@ def method_of_layers():
         , 2: { 0: 0.0, 1: 0.1 }
         }
 
-def sw_model2():
-    ns = [3]
-    D = {0: {0: 0.0, 1: 0.0, 2: 0.3}
-        } 
-    Z = {0: 1.0}
-    K = 3
-    C = 1
-    return (C, D, K, Z, ns)
+# def sw_model2():
+#     ns = [3]
+#     D = {0: {0: 0.0, 1: 0.0, 2: 0.3}
+#         } 
+#     Z = {0: 1.0}
+#     K = 3
+#     C = 1
+#     return (C, D, K, Z, ns)
 
 # Clients:
 # 0: Web sw process
@@ -223,12 +244,117 @@ def hw_model():
     C = 2
     return (C, D, K, Z, ns)
 
+def compute_abs_error(expected, actual):
+    numer = abs(expected - actual)
+    return numer / expected
+
+def check_error_tolerance(hw_results, sw_models):
+    # each software resource will have a response time for a subset
+    # of the devices present in the H/W model. For each of these
+    # response times, traverse the list of S/W models, find the error
+    # and report it.
+    for sw_model in sw_models:
+        for class_name, demand_dict in sw_model.demands.items():
+            for device_name, demand in demand_dict.items():
+                if (class_name in hw_results.response_times and
+                    device_name in hw_results.response_times[class_name]):
+                    hw_time = hw_results.response_times[class_name][device_name]
+                    assumed_time = demand
+                    print(class_name, device_name)
+                    print("Current: ", hw_time)
+                    print("Assumed: ", assumed_time)
+                    error = compute_abs_error(hw_time, assumed_time)
+                    print("Error: ", error)
+
+# For now this method assumes that the sw models appear in order in the list. 
+# This is easy to fix, construct a DAG where edges are clients consuming resources at a
+# queueing center then perform a topological sort of the DAG. This will partition the DAG
+# into layers, each of which corresponds to a single S/W model.
+def solve_lqm_sw_models(sw_models):
+    results = {}
+    for idx in range(len(sw_models)-1):
+        model_to_solve = sw_models[idx]
+        model_result = solve_mva_model(model_to_solve)
+        # Compute idle times for all s/w resources in level idx + 1
+        idle_times = model_result.idle_times()
+        for class_name, idle_time in idle_times.items():
+            results[class_name] = idle_time
+            sw_models[idx+1].add_think_time(class_name, idle_time)
+        
+    return results
+
+def solve_lqm_model(sw_models, hw_model, tolerance):
+    """
+    sw_models :: [Model_Spec]
+    hw_models :: [Model_Spec]
+    Note that sw_models contains all (L) software models even though only L-1 models
+    are actually solved
+    """
+
+    while True:
+        sw_proc_idle_times = solve_lqm_sw_models(sw_models)
+        for class_name, idle_time in sw_proc_idle_times.items():
+            hw_model.add_think_time(class_name, idle_time)
+        hw_model_results = solve_mva_model(hw_model)
+        check_error_tolerance(hw_model_results, sw_models)
+        break
+
+    return hw_model_results
+
 def main():
-    # lqm()
-    model = build_model(*hw_model())
-    print(model)
-    print(solve_mva_model(model))
-    # print(multiclass_mva_solver(*hw_model()))
+    def sw_model2():
+        ns = {"clients": 3}
+        D = {"clients": {"web_server": 0.3}
+            } 
+        Z = {"clients": 1.0}
+        K = 1
+        C = 1
+        return (C, D, K, Z, ns)
+
+    def sw_model1():
+        ns = {"web_server": 1}
+        D = { "web_server": {"db_server": 0.1}
+            }
+        Z = {"web_server": 0.2}
+        K = 3
+        C = 1
+        return (C, D, K, Z, ns)
+
+    def sw_model0():
+        ns = {"db_server": 1}
+        D = { "db_server": {}
+            }
+        Z = {"db_server": 0.1}
+        K = 1
+        C = 1
+        return (C, D, K, Z, ns)
+
+    def hw_model():
+        # Not sure what the number of customers should be?
+        # Since the question states that everything executes synchronously 
+        # I would assume one but that could most certianly be incorrect. 
+        # 0 is web, 1 is db
+        # ns = [1, 1] 
+        ns = { "web_server": 1
+             , "db_server": 1
+             }
+        D = { "web_server": {"web_server_cpu": 0.2, "db_server_cpu": 0.0}
+            , "db_server" : {"web_server_cpu": 0.0, "db_server_cpu": 0.1}
+            }
+        Z = { "web_server": 0.0
+            , "db_server": 0.0
+            }
+        K = 2
+        C = 2
+        return (C, D, K, Z, ns)
+
+    sw_models = [ build_model(*sw_model2())
+                , build_model(*sw_model1())
+                , build_model(*sw_model0())
+                ]
+    hw_model = build_model(*hw_model())
+    model_results = solve_lqm_model(sw_models, hw_model, 0.1)
+    print(model_results)
 
 if __name__ == "__main__":
     main()
