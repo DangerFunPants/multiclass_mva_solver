@@ -1,6 +1,7 @@
 
 from collections import defaultdict
 import pprint as pp
+from toposort import toposort
 
 class Model_Spec:
     def __init__(self):
@@ -176,6 +177,91 @@ def build_model(delay_centers, queueing_centers, demands, think, population_vect
 
     return model
 
+def calculate_initial_demand_estimates( sw_sub_models, model_index):
+    """
+    This method modifies the demands of the models in place.
+    """
+    if model_index == len(sw_sub_models) - 1:
+        # do something hheeeeerre
+        return {res_name: sum(demand_dict.values()) 
+                for res_name, demand_dict
+                in sw_sub_models[model_index].demands.items()}
+
+    sw_res_demand_estimates = calculate_initial_demand_estimates(
+            sw_sub_models, model_index+1)
+
+    for res_name, demand_estimate in sw_res_demand_estimates.items():
+        for client_name in sw_sub_models[model_index].demands.keys():
+            sw_sub_models[model_index].demands[client_name][res_name] = demand_estimate
+
+    return {res_name: sum(demand_dict.values())
+            for res_name, demand_dict 
+            in sw_sub_models[model_index].demands.items()}
+
+def build_overall_model(sw_resources, hw_resources, demands, think, population_vector):
+    model = Model_Spec()
+    # Create a graph of all the software resources in the QNM where nodes 
+    # are resources and directed edges indicate that one resource on which
+    # the edge is incident is receiving service from the resource on which
+    # the edge terminates.
+    sw_resource_graph = defaultdict(set)
+    for sw_resource in sw_resources:
+        egress_edges = demands.get(sw_resource, {})
+        edges_to_sw_resources = [dest_node for dest_node 
+                                    in egress_edges.keys()
+                                    if dest_node in sw_resources]
+        for dest_node in edges_to_sw_resources:
+            sw_resource_graph[sw_resource].add(dest_node)
+
+    sort_result = list(toposort(sw_resource_graph))[::-1]
+    assert(len(sort_result) > 1) # emphasis on layered.
+
+    # Now construct software submodels in accordance with the partitions
+    sw_sub_models = []
+    for idx in range(len(sort_result)-1):
+        sw_clients = sort_result[idx]
+        sw_servers = sort_result[idx+1]
+        ns = {c_name: population_vector[c_name] for c_name in sw_clients}
+        sub_model_think = {c_name: think[c_name] for c_name in sw_clients}
+        sub_model_demands = {c_name: demands[c_name] for c_name in sw_clients}
+        all_resources = {res_name 
+                            for res_dict in sub_model_demands.values()
+                            for res_name in res_dict.keys()}
+        queueing_centers = sw_servers
+        delay_centers = all_resources.difference(queueing_centers)
+        sw_sub_models.append(build_model(delay_centers, queueing_centers, 
+            sub_model_demands, sub_model_think, ns))
+
+    # Last submodel has no outgoing edges
+    sw_clients = sort_result[-1]
+    ns = {c_name: population_vector[c_name] for c_name in sw_clients} 
+    sub_model_think = {c_name: think[c_name] for c_name in sw_clients}
+    sub_model_demands = {c_name: demands[c_name] for c_name in sw_clients}
+    delay_centers = {res_name
+                        for res_dict in sub_model_demands.values()
+                        for res_name in res_dict.keys()}
+    queueing_centers = set()
+    sw_sub_models.append(build_model(delay_centers, queueing_centers,
+        sub_model_demands, sub_model_think, ns))
+
+    calculate_initial_demand_estimates(sw_sub_models, 0)
+
+    # Now construct the hardware submodel
+    hw_model_demands = defaultdict(dict)
+    for client_name, demand_dict in demands.items():
+        for server_name, demand in demand_dict.items():
+            if server_name in hw_resources: 
+                hw_model_demands[client_name][server_name] = demand
+    ns = {client_name: population_vector[client_name] 
+            for client_name in hw_model_demands.keys()}
+    hw_model_think = {client_name: think[client_name]
+                        for client_name in hw_model_demands.keys()}
+    queueing_centers = hw_resources
+    delay_centers = set()
+    hw_model = build_model(delay_centers, queueing_centers, 
+            hw_model_demands, hw_model_think, ns)
+    return (sw_sub_models, hw_model)
+
 def multiclass_mva_solver(model):
     def all_zeros(ns):
         return len([v for v in ns.values() if v != 0]) == 0
@@ -287,61 +373,11 @@ def solve_lqm_model(sw_models, hw_model, tolerance):
     return (sw_model_results, hw_model_results)
 
 def main():
-    def sw_model2():
-        ns = {"clients": 3}
-        D = {"clients": {"web_server": 0.3}
-            } 
-        Z = {"clients": 1.0}
-        delay_centers = {}
-        queueing_centers = {"web_server"}
-        return (delay_centers, queueing_centers, D, Z, ns)
-
-    def sw_model1():
-        ns = {"web_server": 1}
-        D = { "web_server": {"db_server": 0.1, "web_server_cpu": 0.2}
-            }
-        Z = {"web_server": 0.0}
-        delay_centers = {"web_server_cpu"}
-        queueing_centers = {"db_server"}
-        return (delay_centers, queueing_centers, D, Z, ns)
-
-    def sw_model0():
-        ns = {"db_server": 1}
-        D = { "db_server": {"db_server_cpu": 0.1}
-            }
-        Z = {"db_server": 0.0}
-        delay_centers = {"db_server_cpu"}
-        queueing_centers = set()
-        return (delay_centers, queueing_centers, D, Z, ns)
-
-    def hw_model():
-        ns = { "web_server": 1
-             , "db_server": 1
-             }
-        D = { "web_server": {"web_server_cpu": 0.2, "db_server_cpu": 0.0}
-            , "db_server" : {"web_server_cpu": 0.0, "db_server_cpu": 0.1}
-            }
-        Z = { "web_server": 0.0
-            , "db_server": 0.0
-            }
-        delay_centers = {"web_server", "db_server"}
-        queueing_centers = {"web_server_cpu", "db_server_cpu"}
-        return (delay_centers, queueing_centers, D, Z, ns)
-
-    sw_models = [ build_model(*sw_model2())
-                , build_model(*sw_model1())
-                , build_model(*sw_model0())
-                ]
-    hw_model = build_model(*hw_model())
-    
-    sw_model_results, hw_model_results = solve_lqm_model(sw_models, hw_model, 0.1)
-    pp.pprint(sw_model_results[0])
-
-    def overall_model():
-        ns = { "clients": 3
-             , "web_server": 1
-             , "db_server": 1
-             }
+    def lqm_model():
+        population_vector = { "clients": 3
+                            , "web_server": 1
+                            , "db_server": 1
+                            }
         demands = { "clients": {"web_server": 0.0}
                   , "web_server": {"web_server_cpu": 0.2, "db_server": 0.0}
                   , "db_server": {"db_server_cpu": 0.1}
@@ -350,7 +386,13 @@ def main():
                 , "web_server": 0.0
                 , "db_server": 0.0
                 }
+        hw_resources = {"web_server_cpu", "db_server_cpu"}
+        sw_resources = {"clients", "web_server", "db_server"}
+        return (sw_resources, hw_resources, demands, think, population_vector)
 
+    sw_models, hw_model = build_overall_model(*lqm_model())
+    sw_model_results, hw_model_results = solve_lqm_model(sw_models, hw_model, 0.1)
+    pp.pprint(sw_model_results[0])
 
 if __name__ == "__main__":
     main()
