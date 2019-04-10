@@ -11,19 +11,21 @@ class Model_Spec:
         # Demands for queueing and delay resources. Could namespace these two but whatevs
         self._demands = {}
 
-        # Need to differentiate between dealy and queueing centers
-        self._queueing_centers = set()
-        self._delay_centers = set()
+        # The names of the resources are imposed by the network itself.
+        # self._resources :: r -> Resource for r \in Servers
+        self._resources = {}
 
         # Treat think independant of delay resources.
         # think :: c -> \mathbb{R}
         self._think = {}
 
-    def add_queueing_center(self, name):
-        self._queueing_centers.add(name)
+    # def add_queueing_center(self, name):
+    #     self._queueing_centers.add(name)
 
-    def add_delay_center(self, name):
-        self._delay_centers.add(name)
+    # def add_delay_center(self, name):
+    #     self._delay_centers.add(name)
+    def add_resource(self, name, resource):
+        self._resources[name] = resource
 
     def add_customer_class(self, name, count, demands, think):
         """
@@ -32,7 +34,7 @@ class Model_Spec:
         """
         self._ns[name] = count
         self._demands[name] = {}
-        for server in self._queueing_centers.union(self._delay_centers):
+        for server in self._resources.keys():
             self._demands[name][server] = demands.get(server, 0.0)
         self._think[name] = think
 
@@ -58,35 +60,54 @@ class Model_Spec:
         elif key == 1:
             return self.demands
         elif key == 2:
-            return len(self._queueing_centers)
+            return len(self.queueing_centers)
         elif key == 3:
             return self._think
         elif key == 4:
             return self._ns
         elif key == 5:
-            return self._queueing_centers
+            return self.queueing_centers
         elif key == 6:
-            return self._delay_centers
+            return self.delay_centers
         else:
             raise IndexError("""Attempted to unpack Model_Spec 
-                    into more than four params""")
+                    into more than seven params""")
 
-    def get_demands(self):
+    @property
+    def demands(self):
         return self._demands
 
-    def get_queueing_centers(self):
-        return self._queueing_centers
+    @property
+    def queueing_centers(self):
+        return [name for name, resc_description in self._resources.items()
+                    if resc_description.service_type == "queueing_center"]
 
-    def get_delay_centers(self):
-        return self._delay_centers
-
-    demands= property(get_demands)
-    queueing_centers = property(get_queueing_centers)
-    delay_centers = property(get_delay_centers)
+    @property
+    def delay_centers(self):
+        # return self._delay_centers
+        return [name for name, resource in self._resources.items()
+                    if resource.service_type == "delay_center"]
 
     def get_infinite_server_time(self, class_name):
         return sum([self._demands[class_name][inf_server]
-                    for inf_server in self._delay_centers])
+                    for inf_server in self.delay_centers])
+
+class Resource:
+    def __init__(self, service_type, resource_type):
+        """
+        service_type    : Queueing center, delay_center, load dependent queueing center
+        resc_type       : hw or software.
+        """
+        self._service_type = service_type
+        self._resource_type = resource_type
+
+    @property
+    def resource_type(self):
+        return self._resource_type
+    
+    @property
+    def service_type(self):
+        return self._service_type
 
 class Model_Solution:
     def __init__(self, throughput, response_time, queue_lengths, think):
@@ -142,11 +163,12 @@ def build_model(delay_centers, queueing_centers, demands, think, population_vect
     for client_name, v in demands.items():
         for dev_name, demand in v.items():
             if dev_name in delay_centers:
-                model.add_delay_center(dev_name)
+                resource = Resource("delay_center", "unspecified")
             elif dev_name in queueing_centers:
-                model.add_queueing_center(dev_name)
+                resource = Resource("queueing_center", "unspecified")
             else:
                 print("Error building model. Unknown device name.")
+            model.add_resource(dev_name, resource)
 
     for client_name, d in demands.items():
         model.add_customer_class(client_name, population_vector[client_name], 
@@ -314,6 +336,21 @@ def main():
     
     sw_model_results, hw_model_results = solve_lqm_model(sw_models, hw_model, 0.1)
     pp.pprint(sw_model_results[0])
+
+    def overall_model():
+        ns = { "clients": 3
+             , "web_server": 1
+             , "db_server": 1
+             }
+        demands = { "clients": {"web_server": 0.0}
+                  , "web_server": {"web_server_cpu": 0.2, "db_server": 0.0}
+                  , "db_server": {"db_server_cpu": 0.1}
+                  }
+        think = { "clients": 1.0
+                , "web_server": 0.0
+                , "db_server": 0.0
+                }
+
 
 if __name__ == "__main__":
     main()
