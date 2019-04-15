@@ -79,6 +79,10 @@ class Model_Spec:
         return self._demands
 
     @property
+    def think(self):
+        return self._think
+
+    @property
     def queueing_centers(self):
         return [name for name, resc_description in self._resources.items()
                     if resc_description.service_type == "queueing_center"]
@@ -111,11 +115,12 @@ class Resource:
         return self._service_type
 
 class Model_Solution:
-    def __init__(self, throughput, response_time, queue_lengths, think):
+    def __init__(self, throughput, response_time, queue_lengths, think, demands):
         self._throughputs = throughput
         self._response_times = response_time 
         self._queue_lengths = queue_lengths
         self._think = think
+        self._demands = demands
 
     def throughput(self, class_name):
         return self._throughputs[class_name]
@@ -123,6 +128,10 @@ class Model_Solution:
     @property
     def response_times(self):
         return self._response_times
+
+    @property
+    def demands(self):
+        return self._demands
 
     def queue_lengths(self, class_name):
         return self._queue_lengths[class_name]
@@ -132,7 +141,10 @@ class Model_Solution:
             if self._response_times[c_name_prime][dev_name] != 0.0])
         r = sum([dev_dict[dev_name] for c_name, dev_dict in self._response_times.items()
                 if dev_dict[dev_name] != 0.0])
-        u = r * x
+        d = sum([dev_dict[dev_name] for c_name, dev_dict in self.demands.items()
+                if dev_name in dev_dict])
+        # u = r * x
+        u = x * d
         if u == 0:
             return 0.0
         return (r / u) - r
@@ -152,7 +164,7 @@ class Model_Solution:
         s = ( "Throughput: \n"
             + pp.pformat(self._throughputs) + "\n"
             + "Response Times: \n"
-            + pp.pformat(self._response_times)
+            + pp.pformat(dict(self._response_times))
             )
         return s
 
@@ -177,12 +189,11 @@ def build_model(delay_centers, queueing_centers, demands, think, population_vect
 
     return model
 
-def calculate_initial_demand_estimates( sw_sub_models, model_index):
+def calculate_initial_demand_estimates(sw_sub_models, model_index):
     """
     This method modifies the demands of the models in place.
     """
     if model_index == len(sw_sub_models) - 1:
-        # do something hheeeeerre
         return {res_name: sum(demand_dict.values()) 
                 for res_name, demand_dict
                 in sw_sub_models[model_index].demands.items()}
@@ -270,7 +281,7 @@ def multiclass_mva_solver(model):
     C, D, K, Z, ns, queueing_centers, delay_centers = model
     # This will most assuredly break...
     customer_classes = list(ns.keys())
-    device_names = model.queueing_centers
+    device_names = queueing_centers
 
     if all_zeros(ns):
         return ({k: 0 for k in device_names}, {}, {})
@@ -305,7 +316,7 @@ def multiclass_mva_solver(model):
 
 def solve_mva_model(model):
     Q, X, R = multiclass_mva_solver(model)
-    return Model_Solution(X, R, Q, model._think)
+    return Model_Solution(X, R, Q, model.think, model.demands)
 
 def compute_abs_error(expected, actual):
     numer = abs(expected - actual)
@@ -322,11 +333,11 @@ def check_error_tolerance(hw_results, sw_models):
                     abs_errors.append(error)
     return abs_errors
 
-# For now this method assumes that the sw models appear in order in the list. 
-# This is easy to fix, construct a DAG where edges are clients consuming resources at a
-# queueing center then perform a topological sort of the DAG. This will partition 
-# the DAG into layers, each of which corresponds to a single S/W model.
 def solve_lqm_sw_models(sw_models):
+    """
+    This method assumes that sw_models is ordered topologically 
+    based on edges between software resources.
+    """
     results = []
     for idx in range(len(sw_models)-1):
         model_to_solve = sw_models[idx]
@@ -336,7 +347,6 @@ def solve_lqm_sw_models(sw_models):
         idle_times = model_result.idle_times()
         for class_name, idle_time in idle_times.items():
             sw_models[idx+1].add_think_time(class_name, idle_time)
-        
     return results
 
 def solve_lqm_model(sw_models, hw_model, tolerance):
